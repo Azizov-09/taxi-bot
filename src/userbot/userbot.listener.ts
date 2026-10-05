@@ -5,6 +5,7 @@ import type { TelegramClient } from "telegram";
 import { LeadStatus } from "@prisma/client";
 import {
   env,
+  getDeleteSourceMessageIfAdmin,
   getDriverChatIdBySourceChatId,
   getSourceRegionByPassengerChatId,
   getSourceRegionByPassengerChatUsername,
@@ -2006,7 +2007,7 @@ export async function startUserbotListener(client: TelegramClient): Promise<void
 
           const { sourceRegion, driverChatId } = scanContext;
           const ordered = await getOrderedSourceMessages(sourceChatIdNumber, periodicCatchUpLimit);
-          const canDeleteFromSource = env.DELETE_SOURCE_MESSAGE_IF_ADMIN ? await resolveDeleteCapability(sourceChatIdNumber) : false;
+          const canDeleteFromSource = getDeleteSourceMessageIfAdmin(sourceRegion) ? await resolveDeleteCapability(sourceChatIdNumber) : false;
           const stats = await scanStoredSourceMessages({
             sourceChatIdNumber,
             driverChatId,
@@ -2129,7 +2130,7 @@ export async function startUserbotListener(client: TelegramClient): Promise<void
         payload.isDriverChatMember = senderFlags.isDriverChatMember;
       }
 
-      const canDeleteFromSource = env.DELETE_SOURCE_MESSAGE_IF_ADMIN ? await resolveDeleteCapability(sourceChatIdNumber) : false;
+      const canDeleteFromSource = getDeleteSourceMessageIfAdmin(payload.sourceRegion) ? await resolveDeleteCapability(sourceChatIdNumber) : false;
       const actions = buildActions(
         payload,
         sourceChatIdNumber,

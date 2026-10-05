@@ -1,7 +1,15 @@
-﻿import { LeadStatus, Prisma } from "@prisma/client";
+import { LeadStatus, Prisma } from "@prisma/client";
 import type { Context } from "grammy";
 import { DRIVER_AD_NEGATIVE_KEYWORDS } from "../config/defaultKeywords.js";
-import { env, getDriverChatIdBySourceChatId, getSourceRegionByPassengerChatId, type SourceRegion } from "../config/env.js";
+import {
+  env,
+  getDeleteIgnoredMessageIfAdmin,
+  getDeleteSourceMessageIfAdmin,
+  getDriverChatIdBySourceChatId,
+  getPassengerGroupAutoReplies,
+  getSourceRegionByPassengerChatId,
+  type SourceRegion
+} from "../config/env.js";
 import { prisma } from "../prisma/client.js";
 import { classifyMessage, keywordClassify, normalizeText } from "./leadClassifier.service.js";
 import { extractPhone } from "../utils/phone.js";
@@ -891,6 +899,17 @@ function isForwardedMessage(msg: NonNullable<Context["msg"]>): boolean {
   );
 }
 
+function formatRegionDisplayName(region?: SourceRegion | null): string | null {
+  if (!region) return null;
+  switch (region) {
+    case "GULISTON": return "Guliston";
+    case "TASHKENT": return "Toshkent";
+    case "KOMSOMOL": return "Komsomol";
+    case "ANDIJON": return "Andijon";
+    default: return region;
+  }
+}
+
 function formatFullName(firstName: string, lastName?: string): string {
   const combined = `${firstName} ${lastName ?? ""}`.replace(/\s+/g, " ").trim();
   return combined.length > 0 ? combined : "Noma'lum";
@@ -1141,7 +1160,7 @@ export async function processIncomingLead(payload: UnifiedIncomingMessage, actio
   const passengerCountFromRules = extractPassengerCount(originalText);
   const timeHintFromRules = extractTimeHint(originalText);
 
-  const fromLocation = sanitizeLocationValue(classification.fromLocation ?? routeParts.from);
+  const rawFromLocation = sanitizeLocationValue(classification.fromLocation ?? routeParts.from);
   const toLocation = sanitizeLocationValue(classification.toLocation ?? routeParts.to);
   const phone = classification.phone ?? phoneFromRules;
   const passengerCount = classification.passengerCount ?? passengerCountFromRules;
@@ -1161,9 +1180,6 @@ export async function processIncomingLead(payload: UnifiedIncomingMessage, actio
   const isCargo = categoryIsCargo || cargoPatternHits.length > 0;
   const isRouteFareInquiry = Boolean(routeFromRules) && priceQueryHits.length > 0;
   const isAmbiguousRouteOnly = isAmbiguousRouteOnlyMessage(classification.normalizedText);
-  const hasRouteDetails = Boolean(routeFromRules) || Boolean(fromLocation) || Boolean(toLocation);
-  const hasMinimumLeadDetails = Boolean(phone) || hasRouteDetails;
-  const isMetaInstructionMessage = metaInstructionHits.length >= 2 && !hasMinimumLeadDetails;
   const senderIsHiddenByTelegram = payload.senderId.startsWith("chat:");
   const hasHiddenSenderIdentity = senderIsHiddenByTelegram;
   const hiddenWithoutContactIdentity = senderIsHiddenByTelegram && !payload.senderUsername && !phone;
@@ -1172,10 +1188,19 @@ export async function processIncomingLead(payload: UnifiedIncomingMessage, actio
   const isDriverChatMember = payload.isDriverChatMember === true;
   const isProtectedFromDeletion = isSourceAdmin || isDriverChatMember;
   const senderDisplayName = buildSenderDisplayName(payload);
-  const hasHardPassengerSignal =
-    !hasExplicitDriverAdSignal && (keywordResult.score >= 2 || strongPassengerIntent || Boolean(phone) || Boolean(routeFromRules));
   const hasPassengerSoftSignal = PASSENGER_SOFT_SIGNAL_REGEX.test(originalText) || PASSENGER_SOFT_SIGNAL_CYRILLIC_REGEX.test(originalText);
   const hasTaxiNeedIntent = TAXI_NEED_INTENT_REGEX.test(originalText);
+
+  const hasHardPassengerSignal =
+    !hasExplicitDriverAdSignal && (keywordResult.score >= 2 || strongPassengerIntent || hasTaxiNeedIntent || Boolean(phone) || Boolean(routeFromRules));
+
+  const hasExplicitRouteDetails = Boolean(routeFromRules) || Boolean(rawFromLocation) || Boolean(toLocation);
+  const hasTaxiIntentWithoutRoute = (hasTaxiNeedIntent || categoryIsPassenger || strongPassengerIntent) && !hiddenWithoutContactIdentity;
+  const fallbackFromLocation = rawFromLocation ?? (hasTaxiIntentWithoutRoute && payload.sourceRegion ? formatRegionDisplayName(payload.sourceRegion) : null);
+  const fromLocation = rawFromLocation ?? fallbackFromLocation;
+  const hasRouteDetails = hasExplicitRouteDetails || (hasTaxiIntentWithoutRoute && Boolean(fromLocation));
+  const hasMinimumLeadDetails = Boolean(phone) || hasRouteDetails || hasTaxiIntentWithoutRoute;
+  const isMetaInstructionMessage = metaInstructionHits.length >= 2 && !hasMinimumLeadDetails;
   const chatNoiseMessage = isChatNoiseMessage(originalText, classification.normalizedText);
   const phoneDropMessage = isPhoneDropMessage(originalText, phone);
   const commercialAdNoiseHits = detectCommercialAdNoiseHits(originalText, classification.normalizedText);
@@ -1330,7 +1355,7 @@ export async function processIncomingLead(payload: UnifiedIncomingMessage, actio
   };
 
   const deleteFromSourceIfPossible = async (reason: string): Promise<boolean> => {
-    if (!env.DELETE_SOURCE_MESSAGE_IF_ADMIN || !actions.deleteFromSource) {
+    if (!getDeleteSourceMessageIfAdmin(payload.sourceRegion) || !actions.deleteFromSource) {
       return false;
     }
 
@@ -1397,7 +1422,7 @@ export async function processIncomingLead(payload: UnifiedIncomingMessage, actio
     const shouldWarnDriverAdSender = env.SEND_DRIVER_AD_WARNINGS && isDriverAd && !isDriverChatMember;
 
     if (shouldWarnDriverAdSender && !payload.isStartupBackfill) {
-      if (actions.notifySourceChat && env.PASSENGER_GROUP_AUTO_REPLIES) {
+      if (actions.notifySourceChat && getPassengerGroupAutoReplies(payload.sourceRegion)) {
         await notifySafely({
           send: async () => actions.notifySourceChat!(buildSourceDriverAdWarningMessage(senderDisplayName), { replyToSource: !driverAdDeletedFromSource }),
           successLog: "Driver ad source warning sent",
@@ -1416,7 +1441,7 @@ export async function processIncomingLead(payload: UnifiedIncomingMessage, actio
       }
     }
 
-    if (shouldSendSourceFormatHint && env.PASSENGER_GROUP_AUTO_REPLIES && actions.notifySourceChat && !payload.isStartupBackfill) {
+    if (shouldSendSourceFormatHint && getPassengerGroupAutoReplies(payload.sourceRegion) && actions.notifySourceChat && !payload.isStartupBackfill) {
       await notifySafely({
         send: async () => actions.notifySourceChat!(buildSourceFormatHintMessage()),
         successLog: "Source format hint sent",
@@ -1439,7 +1464,7 @@ export async function processIncomingLead(payload: UnifiedIncomingMessage, actio
         (isCargo ||
           isSpam ||
           isMetaInstructionMessage ||
-          (env.DELETE_IGNORED_MESSAGE_IF_ADMIN &&
+          (getDeleteIgnoredMessageIfAdmin(payload.sourceRegion) &&
             taxiRelatedCandidateMessage &&
             (isAmbiguousRouteOnly ||
               shouldSendSourceFormatHint ||
@@ -1557,7 +1582,7 @@ export async function processIncomingLead(payload: UnifiedIncomingMessage, actio
     let sourceDeletedFromSource = false;
     let sourceDeleteReason: string | undefined;
 
-    if (env.DELETE_SOURCE_MESSAGE_IF_ADMIN && actions.deleteFromSource) {
+    if (getDeleteSourceMessageIfAdmin(payload.sourceRegion) && actions.deleteFromSource) {
       try {
         await actions.deleteFromSource();
         sourceDeletedFromSource = true;
