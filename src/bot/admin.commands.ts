@@ -4,21 +4,34 @@ import { env, type SourceRegion } from "../config/env.js";
 import {
   formatAdminIdentity,
   getAdminListSummary,
+  listActiveAdmins,
   parseAdminIdentityInput,
   removeAdminByInput,
   saveAdminIdentity,
   type AdminIdentityInput
 } from "../services/admin.service.js";
 import { addKeyword, listActiveKeywords, removeKeyword } from "../services/keyword.service.js";
-import { addKeywordEntry, mapInputCategory } from "../services/keywordDictionary.service.js";
+import {
+  addKeywordEntry,
+  getKeywordCountByCategory,
+  listKeywordEntries,
+  mapInputCategory,
+  removeKeywordEntry
+} from "../services/keywordDictionary.service.js";
 import { classifyMessage } from "../services/leadClassifier.service.js";
 import { getAdminStatsSnapshot, getStatsSnapshot, getStatusSnapshot } from "../services/lead.service.js";
 import {
   addPassengerSource,
+  getPassengerSourcesByRegion,
   getRuntimeConfigText,
   parsePassengerSourceInput,
   parseSourceRegionInput,
   parseTelegramChatIdInput,
+  parseTelegramUsernameInput,
+  removeDriverChat,
+  removePassengerSource,
+  removePassengerSourceChat,
+  removePassengerSourceUsername,
   setDriverChat,
   setRegionalRuntimeBooleanSetting,
   toggleRuntimeBooleanSetting,
@@ -30,10 +43,12 @@ import { getCommandArgument, requireAdmin } from "./admin.utils.js";
 
 type PendingAdminAction =
   | { type: "add_passenger"; region: SourceRegion }
+  | { type: "remove_passenger"; region: SourceRegion }
   | { type: "set_driver"; region: SourceRegion }
   | { type: "add_admin" }
   | { type: "remove_admin" }
-  | { type: "add_keyword"; region: SourceRegion; category: KeywordCategory };
+  | { type: "add_keyword"; region: SourceRegion; category: KeywordCategory }
+  | { type: "remove_keyword"; category?: KeywordCategory };
 
 const pendingAdminActions = new Map<number, PendingAdminAction>();
 const SOURCE_REGIONS: SourceRegion[] = ["TASHKENT", "GULISTON", "KOMSOMOL", "ANDIJON"];
@@ -135,23 +150,31 @@ function formatValueBadge(value: boolean | null, globalValue: boolean): string {
 function buildAdminPanelKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text("➕ Yo'lovchi guruhi", "admin:add_passenger")
-    .text("🚖 Haydovchilar guruhi", "admin:set_driver")
+    .text("➖ Yo'lovchi guruhi", "admin:remove_passenger")
+    .row()
+    .text("🚖 Haydovchi sozlash", "admin:set_driver")
+    .text("🗑 Haydovchi o'chirish", "admin:remove_driver")
     .row()
     .text("👮 Admin qo'shish", "admin:add_admin")
     .text("🚫 Admin o'chirish", "admin:remove_admin")
+    .row()
+    .text("📚 So'z qo'shish", "admin:add_keyword")
+    .text("🗑 So'z o'chirish", "admin:remove_keyword")
+    .row()
+    .text("📋 Barcha guruhlar", "admin:list_groups")
+    .text("📖 Lug'at ro'yxati", "admin:list_keywords")
+    .row()
+    .text("📊 Statistika", "admin:stats")
+    .text("🔄 Yangilash", "admin:panel")
     .row()
     .text(`💬 ${TOGGLE_LABELS.PASSENGER_GROUP_AUTO_REPLIES}: ${onOff(env.PASSENGER_GROUP_AUTO_REPLIES)} ⚙️`, "admin:menu_toggle:PASSENGER_GROUP_AUTO_REPLIES")
     .row()
     .text(`📩 ${TOGGLE_LABELS.SEND_PRIVATE_ACK_TO_PASSENGER}: ${onOff(env.SEND_PRIVATE_ACK_TO_PASSENGER)} ⚙️`, "admin:menu_toggle:SEND_PRIVATE_ACK_TO_PASSENGER")
     .row()
-    .text("📚 Gap/so'z qo'shish", "admin:add_keyword")
-    .text("📊 Statistika", "admin:stats")
-    .row()
     .text(`🗑 ${TOGGLE_LABELS.DELETE_SOURCE_MESSAGE_IF_ADMIN}: ${onOff(env.DELETE_SOURCE_MESSAGE_IF_ADMIN)} ⚙️`, "admin:menu_toggle:DELETE_SOURCE_MESSAGE_IF_ADMIN")
     .row()
     .text(`🧹 ${TOGGLE_LABELS.DELETE_IGNORED_MESSAGE_IF_ADMIN}: ${onOff(env.DELETE_IGNORED_MESSAGE_IF_ADMIN)} ⚙️`, "admin:menu_toggle:DELETE_IGNORED_MESSAGE_IF_ADMIN")
     .row()
-    .text("📋 Ro'yxat", "admin:panel")
     .text("❌ Bekor qilish", "admin:cancel");
 }
 
@@ -188,13 +211,120 @@ function formatToggleSubmenuText(setting: RuntimeBooleanSetting): string {
   return lines.join("\n");
 }
 
-function buildRegionKeyboard(prefix: "admin:add_passenger_region" | "admin:set_driver_region" | "admin:add_keyword_region"): InlineKeyboard {
+function buildRegionKeyboard(prefix: string): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   for (const region of SOURCE_REGIONS) {
     keyboard.text(REGION_LABELS[region], `${prefix}:${region}`).row();
   }
 
   keyboard.text("⬅️ Orqaga", "admin:panel");
+  return keyboard;
+}
+
+function buildRemovePassengerKeyboard(region: SourceRegion): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const chatIds = env.PASSENGER_CHAT_IDS_BY_REGION[region] ?? [];
+  const usernames = env.PASSENGER_CHAT_USERNAMES_BY_REGION[region] ?? [];
+
+  for (const chatId of chatIds) {
+    keyboard.text(`❌ ${chatId}`, `admin:do_del_pass_chat:${region}:${chatId}`).row();
+  }
+
+  for (const username of usernames) {
+    keyboard.text(`❌ @${username}`, `admin:do_del_pass_user:${region}:${username}`).row();
+  }
+
+  keyboard.text("⬅️ Orqaga", "admin:remove_passenger");
+  return keyboard;
+}
+
+function formatRemovePassengerText(region: SourceRegion): string {
+  const chatIds = env.PASSENGER_CHAT_IDS_BY_REGION[region] ?? [];
+  const usernames = env.PASSENGER_CHAT_USERNAMES_BY_REGION[region] ?? [];
+  const total = chatIds.length + usernames.length;
+
+  if (total === 0) {
+    return `📍 ${REGION_LABELS[region]} yo'nalishida yo'lovchi guruhi yo'q.`;
+  }
+
+  return [
+    `📍 ${REGION_LABELS[region]} yo'lovchi guruhlari (${total} ta):`,
+    "",
+    "O'chirmoqchi bo'lgan guruh tugmasini bosing yoki guruh ID/linkini xabar qilib yuboring:",
+    "Bekor qilish: /cancel"
+  ].join("\n");
+}
+
+function buildRemoveDriverKeyboard(): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const region of SOURCE_REGIONS) {
+    const current = env.DRIVER_CHAT_ID_BY_REGION[region];
+    const label = current ? `${REGION_LABELS[region]}: ${current}` : `${REGION_LABELS[region]}: [yo'q]`;
+    keyboard.text(`❌ ${label}`, `admin:do_del_driver:${region}`).row();
+  }
+  keyboard.text("⬅️ Orqaga", "admin:panel");
+  return keyboard;
+}
+
+function formatListGroupsText(): string {
+  const lines: string[] = ["📋 Barcha sozlangan guruhlar:", ""];
+
+  for (const region of SOURCE_REGIONS) {
+    const chatIds = env.PASSENGER_CHAT_IDS_BY_REGION[region] ?? [];
+    const usernames = env.PASSENGER_CHAT_USERNAMES_BY_REGION[region] ?? [];
+    const driver = env.DRIVER_CHAT_ID_BY_REGION[region];
+
+    lines.push(`📍 ${REGION_LABELS[region].toUpperCase()}:`);
+    if (chatIds.length === 0 && usernames.length === 0) {
+      lines.push("  👥 Yo'lovchi: birorta ham guruh yo'q");
+    } else {
+      const items: string[] = [
+        ...chatIds.map((id) => String(id)),
+        ...usernames.map((u) => `@${u}`)
+      ];
+      lines.push(`  👥 Yo'lovchi (${items.length}): ${items.join(", ")}`);
+    }
+    lines.push(`  🚘 Haydovchi: ${driver ? String(driver) : "sozlanmagan"}`);
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+function buildListGroupsKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("➕ Yo'lovchi qo'shish", "admin:add_passenger")
+    .text("➖ Yo'lovchi o'chirish", "admin:remove_passenger")
+    .row()
+    .text("🚖 Haydovchi sozlash", "admin:set_driver")
+    .text("🗑 Haydovchi o'chirish", "admin:remove_driver")
+    .row()
+    .text("⬅️ Asosiy panel", "admin:panel");
+}
+
+async function formatListKeywordsText(): Promise<string> {
+  const counts = await getKeywordCountByCategory();
+  return [
+    "📖 Lug'at bo'yicha ma'lumot:",
+    "",
+    `👤 Yo'lovchi so'zlari: ${counts.PASSENGER} ta`,
+    `🚖 Haydovchi so'zlari: ${counts.DRIVER} ta`,
+    `📦 Pochta/yuk so'zlari: ${counts.CARGO} ta`,
+    `🚫 Reklama/spam so'zlari: ${counts.SPAM} ta`,
+    `❓ Noaniq so'zlar: ${counts.AMBIGUOUS} ta`,
+    "",
+    "Ko'rmoqchi bo'lgan toifani tanlang:"
+  ].join("\n");
+}
+
+function buildListKeywordsKeyboard(): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const cat of KEYWORD_CATEGORIES) {
+    keyboard.text(`👁 ${CATEGORY_LABELS[cat]}`, `admin:view_keywords:${cat}`).row();
+  }
+  keyboard.text("➕ So'z qo'shish", "admin:add_keyword");
+  keyboard.text("🗑 So'z o'chirish", "admin:remove_keyword").row();
+  keyboard.text("⬅️ Asosiy panel", "admin:panel");
   return keyboard;
 }
 
@@ -258,6 +388,28 @@ function parseRegionAndChatId(arg: string): { region: SourceRegion; chatId: numb
   }
 
   return { region, chatId };
+}
+
+async function resolveDriverChatId(ctx: Context, text: string): Promise<number | null> {
+  const directId = parseTelegramChatIdInput(text, ctx.chat?.id);
+  if (directId !== null && directId < 0) {
+    return directId;
+  }
+
+  const username = parseTelegramUsernameInput(text);
+  if (username) {
+    try {
+      const chat = await ctx.api.getChat(`@${username}`);
+      const resolved = Number(chat.id);
+      if (Number.isInteger(resolved) && resolved < 0) {
+        return resolved;
+      }
+    } catch {
+      // not resolvable
+    }
+  }
+
+  return null;
 }
 
 function parseKeywordInput(text: string): { phrase: string; weight: number } | null {
@@ -447,7 +599,7 @@ async function savePassengerSourceWithCheck(
 
   if (resolvedChatId !== null) {
     added.push(await addPassengerSource(region, { kind: "chat_id", value: resolvedChatId }));
-  } else if (source.kind === "chat_id" && warning === null) {
+  } else if (source.kind === "chat_id") {
     added.push(await addPassengerSource(region, source));
   }
 
@@ -480,10 +632,9 @@ function buildPassengerSourceAddReply(
 
   if (!result.botCanRead) {
     lines.push("");
-    lines.push("⚠️ Bot bu guruhda a'zo/admin ekanini tasdiqlay olmadi.");
-    lines.push("Xabarlarni olish uchun bot yoki userbot guruh ichida bo'lishi kerak.");
+    lines.push("ℹ️ Bot bu guruhda a'zo emas (xabarlar userbot orqali tinglanadi).");
     if (result.botLink) {
-      lines.push(`Botni qo'shish: ${result.botLink}`);
+      lines.push(`Botni qo'shish (ixtiyoriy): ${result.botLink}`);
     }
   }
 
@@ -509,6 +660,15 @@ function getPendingActionPrompt(action: PendingAdminAction): string {
     ].join("\n");
   }
 
+  if (action.type === "remove_keyword") {
+    return [
+      "O'chirmoqchi bo'lgan so'z yoki gapni yuboring.",
+      "",
+      "Masalan: taxi kerak",
+      "Bekor qilish: /cancel"
+    ].join("\n");
+  }
+
   if (action.type === "add_passenger") {
     return [
       `${REGION_LABELS[action.region]} uchun yo'lovchi guruh ID yoki public link yuboring.`,
@@ -520,10 +680,19 @@ function getPendingActionPrompt(action: PendingAdminAction): string {
     ].join("\n");
   }
 
+  if (action.type === "remove_passenger") {
+    return [
+      `${REGION_LABELS[action.region]} yo'nalishidan o'chirish uchun guruh ID yoki link/username yuboring.`,
+      "",
+      "Masalan: -1001234567890 yoki @guruh_username",
+      "Bekor qilish: /cancel"
+    ].join("\n");
+  }
+
   return [
-    `${REGION_LABELS[action.region]} uchun haydovchilar guruh/kanal ID yuboring.`,
+    `${REGION_LABELS[action.region]} uchun haydovchilar guruh/kanal ID yoki username yuboring.`,
     "",
-    "Masalan: -1001234567890",
+    "Masalan: -1001234567890 yoki @haydovchilar",
     "Agar shu guruh ichida turgan bo'lsangiz: shu",
     "Bekor qilish: /cancel"
   ].join("\n");
@@ -629,9 +798,55 @@ async function handlePendingAdminInput(ctx: Context): Promise<boolean> {
     return true;
   }
 
-  const chatId = parseTelegramChatIdInput(text, ctx.chat?.id);
+  if (pending.type === "remove_passenger") {
+    const source = parsePassengerSourceInput(text, ctx.chat?.id);
+    if (!source) {
+      await ctx.reply("Guruh ID yoki username noto'g'ri. Masalan: -1001234567890 yoki @username");
+      return true;
+    }
+
+    const removed = await removePassengerSource(pending.region, source);
+    pendingAdminActions.delete(adminId);
+    await ctx.reply(
+      removed
+        ? `✅ Guruh olib tashlandi: ${REGION_LABELS[pending.region]} -> ${formatPassengerSourceResult(source)}`
+        : "Guruh topilmadi yoki o'chirib bo'lmadi.",
+      { reply_markup: buildAdminPanelKeyboard() }
+    );
+    return true;
+  }
+
+  if (pending.type === "remove_keyword") {
+    const count = await removeKeywordEntry({ phrase: text, category: pending.category });
+    await removeKeyword(text).catch(() => null);
+    pendingAdminActions.delete(adminId);
+    await ctx.reply(
+      count > 0
+        ? `✅ Lug'atdan o'chirildi: "${text}" (${count} ta yozuv o'chirildi).`
+        : `"${text}" lug'atda topilmadi.`,
+      { reply_markup: buildAdminPanelKeyboard() }
+    );
+    return true;
+  }
+
+  let chatId = parseTelegramChatIdInput(text, ctx.chat?.id);
   if (chatId === null || chatId > 0) {
-    await ctx.reply("Chat ID noto'g'ri. Guruh/kanal ID odatda -100... ko'rinishida bo'ladi.");
+    const username = parseTelegramUsernameInput(text);
+    if (username) {
+      try {
+        const chat = await ctx.api.getChat(`@${username}`);
+        const resolved = Number(chat.id);
+        if (Number.isInteger(resolved) && resolved < 0) {
+          chatId = resolved;
+        }
+      } catch {
+        // failed
+      }
+    }
+  }
+
+  if (chatId === null || chatId > 0) {
+    await ctx.reply("Chat ID yoki username noto'g'ri. Masalan: -1001234567890 yoki @kanal_username");
     return true;
   }
 
@@ -829,6 +1044,125 @@ export function registerAdminCommands(bot: Bot<Context>): void {
       await ctx.editMessageText(`${REGION_LABELS[region]} uchun turini tanlang:`, {
         reply_markup: buildKeywordCategoryKeyboard(region)
       });
+      return;
+    }
+
+    if (data === "admin:remove_passenger") {
+      await ctx.editMessageText("Qaysi yo'nalishdan yo'lovchi guruhini o'chirmoqchisiz?", {
+        reply_markup: buildRegionKeyboard("admin:del_passenger_reg")
+      });
+      return;
+    }
+
+    const delPassengerRegMatch = data.match(/^admin:del_passenger_reg:(TASHKENT|GULISTON|KOMSOMOL|ANDIJON)$/u);
+    if (delPassengerRegMatch) {
+      const region = delPassengerRegMatch[1] as SourceRegion;
+      if (adminId !== undefined) {
+        pendingAdminActions.set(adminId, { type: "remove_passenger", region });
+      }
+      await ctx.editMessageText(formatRemovePassengerText(region), {
+        reply_markup: buildRemovePassengerKeyboard(region)
+      });
+      return;
+    }
+
+    const doDelPassChatMatch = data.match(/^admin:do_del_pass_chat:(TASHKENT|GULISTON|KOMSOMOL|ANDIJON):(-?\d+)$/u);
+    if (doDelPassChatMatch) {
+      const region = doDelPassChatMatch[1] as SourceRegion;
+      const chatId = Number(doDelPassChatMatch[2]);
+      await removePassengerSourceChat(region, chatId);
+      if (adminId !== undefined) {
+        pendingAdminActions.delete(adminId);
+      }
+      await ctx.answerCallbackQuery(`O'chirildi: ${chatId}`).catch(() => undefined);
+      await ctx.editMessageText(formatRemovePassengerText(region), {
+        reply_markup: buildRemovePassengerKeyboard(region)
+      });
+      return;
+    }
+
+    const doDelPassUserMatch = data.match(/^admin:do_del_pass_user:(TASHKENT|GULISTON|KOMSOMOL|ANDIJON):([a-zA-Z0-9_]+)$/u);
+    if (doDelPassUserMatch) {
+      const region = doDelPassUserMatch[1] as SourceRegion | undefined;
+      const username = doDelPassUserMatch[2];
+      if (region && username) {
+        await removePassengerSourceUsername(region, username);
+        if (adminId !== undefined) {
+          pendingAdminActions.delete(adminId);
+        }
+        await ctx.answerCallbackQuery(`O'chirildi: @${username}`).catch(() => undefined);
+        await ctx.editMessageText(formatRemovePassengerText(region), {
+          reply_markup: buildRemovePassengerKeyboard(region)
+        });
+      }
+      return;
+    }
+
+    if (data === "admin:remove_driver") {
+      await ctx.editMessageText("Qaysi yo'nalishdagi haydovchilar guruhini o'chirmoqchisiz?", {
+        reply_markup: buildRemoveDriverKeyboard()
+      });
+      return;
+    }
+
+    const doDelDriverMatch = data.match(/^admin:do_del_driver:(TASHKENT|GULISTON|KOMSOMOL|ANDIJON)$/u);
+    if (doDelDriverMatch) {
+      const region = doDelDriverMatch[1] as SourceRegion;
+      await removeDriverChat(region);
+      await ctx.answerCallbackQuery(`${REGION_LABELS[region]} haydovchi guruhi o'chirildi`).catch(() => undefined);
+      await ctx.editMessageText("Qaysi yo'nalishdagi haydovchilar guruhini o'chirmoqchisiz?", {
+        reply_markup: buildRemoveDriverKeyboard()
+      });
+      return;
+    }
+
+    if (data === "admin:remove_keyword" && adminId !== undefined) {
+      const pending: PendingAdminAction = { type: "remove_keyword" };
+      pendingAdminActions.set(adminId, pending);
+      await ctx.reply(getPendingActionPrompt(pending));
+      return;
+    }
+
+    if (data === "admin:list_groups") {
+      await ctx.editMessageText(formatListGroupsText(), {
+        reply_markup: buildListGroupsKeyboard()
+      });
+      return;
+    }
+
+    if (data === "admin:list_keywords") {
+      const text = await formatListKeywordsText();
+      await ctx.editMessageText(text, {
+        reply_markup: buildListKeywordsKeyboard()
+      });
+      return;
+    }
+
+    const viewKeywordsMatch = data.match(/^admin:view_keywords:(PASSENGER|DRIVER|CARGO|SPAM|AMBIGUOUS)$/u);
+    if (viewKeywordsMatch) {
+      const category = viewKeywordsMatch[1] as KeywordCategory;
+      const items = await listKeywordEntries({ category, limit: 30 });
+      const lines = [
+        `📖 ${CATEGORY_LABELS[category]} so'zlari (jami ${items.length} ta ko'rsatilmoqda):`,
+        ""
+      ];
+      if (items.length === 0) {
+        lines.push("Hozircha so'zlar yo'q.");
+      } else {
+        for (const item of items) {
+          lines.push(`• ${item.phrase} (kuchi: ${item.weight})`);
+        }
+      }
+      lines.push("");
+      lines.push("O'chirish uchun: /removedict <soz> yoki 'So'z o'chirish' tugmasini bosing.");
+
+      const kb = new InlineKeyboard()
+        .text("➕ So'z qo'shish", "admin:add_keyword")
+        .text("🗑 So'z o'chirish", "admin:remove_keyword")
+        .row()
+        .text("⬅️ Orqaga", "admin:list_keywords");
+
+      await ctx.editMessageText(lines.join("\n"), { reply_markup: kb });
       return;
     }
 
@@ -1050,16 +1384,101 @@ export function registerAdminCommands(bot: Bot<Context>): void {
       return;
     }
 
-    const parsedArg = parseRegionAndChatId(getCommandArgument(ctx));
-    if (!parsedArg) {
-      await ctx.reply("Foydalanish: /setdriver GULISTON -1001234567890");
+    const arg = getCommandArgument(ctx);
+    const [rawRegion = "", ...driverParts] = arg.split(/\s+/u);
+    const region = parseSourceRegionInput(rawRegion);
+    const rawDriver = driverParts.join(" ").trim();
+    const chatId = rawDriver ? await resolveDriverChatId(ctx, rawDriver) : null;
+
+    if (!region || !chatId) {
+      await ctx.reply("Foydalanish: /setdriver GULISTON -1001234567890 yoki /setdriver TASHKENT @haydovchilar");
       return;
     }
 
-    await setDriverChat(parsedArg.region, parsedArg.chatId);
-    await ctx.reply(`✅ Haydovchilar guruhi sozlandi: ${REGION_LABELS[parsedArg.region]} -> ${parsedArg.chatId}\nID .env faylga ham, DBga ham yozildi.`, {
+    await setDriverChat(region, chatId);
+    await ctx.reply(`✅ Haydovchilar guruhi sozlandi: ${REGION_LABELS[region]} -> ${chatId}\nID .env faylga ham, DBga ham yozildi.`, {
       reply_markup: buildAdminPanelKeyboard()
     });
+  });
+
+  bot.command("removedriver", async (ctx) => {
+    if (!(await requireAdmin(ctx))) {
+      return;
+    }
+
+    const region = parseSourceRegionInput(getCommandArgument(ctx));
+    if (!region) {
+      await ctx.reply("Foydalanish: /removedriver TASHKENT (yoki GULISTON, KOMSOMOL, ANDIJON)");
+      return;
+    }
+
+    await removeDriverChat(region);
+    await ctx.reply(`✅ Haydovchilar guruhi o'chirildi: ${REGION_LABELS[region]}`, {
+      reply_markup: buildAdminPanelKeyboard()
+    });
+  });
+
+  bot.command("removepassenger", async (ctx) => {
+    if (!(await requireAdmin(ctx))) {
+      return;
+    }
+
+    const arg = getCommandArgument(ctx);
+    const [rawRegion, ...sourceParts] = arg.split(/\s+/u);
+    const region = parseSourceRegionInput(rawRegion ?? "");
+    const rawSource = sourceParts.join(" ").trim();
+    const source = rawSource ? parsePassengerSourceInput(rawSource, ctx.chat?.id) : null;
+
+    if (!region || !source) {
+      await ctx.reply("Foydalanish: /removepassenger TASHKENT -1001234567890 yoki /removepassenger GULISTON @username");
+      return;
+    }
+
+    const removed = await removePassengerSource(region, source);
+    await ctx.reply(
+      removed
+        ? `✅ Yo'lovchi guruhi olib tashlandi: ${REGION_LABELS[region]} -> ${formatPassengerSourceResult(source)}`
+        : "Guruh topilmadi.",
+      { reply_markup: buildAdminPanelKeyboard() }
+    );
+  });
+
+  bot.command("removedict", async (ctx) => {
+    if (!(await requireAdmin(ctx))) {
+      return;
+    }
+
+    const phrase = getCommandArgument(ctx);
+    if (!phrase) {
+      await ctx.reply("Foydalanish: /removedict taxi kerak");
+      return;
+    }
+
+    const count = await removeKeywordEntry({ phrase });
+    await removeKeyword(phrase).catch(() => null);
+
+    await ctx.reply(
+      count > 0
+        ? `✅ Lug'atdan o'chirildi: "${phrase}" (${count} ta yozuv).`
+        : `"${phrase}" lug'atda topilmadi.`,
+      { reply_markup: buildAdminPanelKeyboard() }
+    );
+  });
+
+  bot.command("listgroups", async (ctx) => {
+    if (!(await requireAdmin(ctx))) {
+      return;
+    }
+
+    await ctx.reply(formatListGroupsText(), { reply_markup: buildListGroupsKeyboard() });
+  });
+
+  bot.command("listkeywords", async (ctx) => {
+    if (!(await requireAdmin(ctx))) {
+      return;
+    }
+
+    await ctx.reply(await formatListKeywordsText(), { reply_markup: buildListKeywordsKeyboard() });
   });
 
   bot.command("test", async (ctx) => {

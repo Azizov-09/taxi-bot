@@ -1,6 +1,4 @@
-import { env, getSourceRegionByPassengerChatId, type SourceRegion } from "../config/env.js";
-
-const SOURCE_REGIONS: SourceRegion[] = ["TASHKENT", "GULISTON", "KOMSOMOL"];
+import { env, getSourceRegionByPassengerChatId, SOURCE_REGIONS, type SourceRegion } from "../config/env.js";
 
 function buildChatIdLookupCandidates(chatId: number): number[] {
   const candidates = new Set<number>([chatId]);

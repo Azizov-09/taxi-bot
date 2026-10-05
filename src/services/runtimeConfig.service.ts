@@ -5,6 +5,9 @@ import {
   normalizeTelegramChatUsername,
   registerResolvedPassengerChat,
   registerResolvedPassengerChatUsername,
+  unregisterResolvedPassengerChat,
+  unregisterResolvedPassengerChatUsername,
+  unsetEnvDriverRegion,
   type SourceRegion
 } from "../config/env.js";
 import { prisma } from "../prisma/client.js";
@@ -524,6 +527,64 @@ export async function addPassengerSource(region: SourceRegion, source: Passenger
 
   const normalizedUsername = await addPassengerSourceUsername(region, source.value);
   return { kind: "username", value: normalizedUsername };
+}
+
+export async function removePassengerSourceChat(region: SourceRegion, chatId: number): Promise<void> {
+  unregisterResolvedPassengerChat(chatId, region);
+
+  const passengerRegionalUpdates = Object.fromEntries(
+    SOURCE_REGIONS.map((item) => [getPassengerRegionalEnvKey(item), formatChatIdList(getPassengerRegionalList(item))])
+  );
+
+  await updateEnvFile({
+    ...passengerRegionalUpdates,
+    PASSENGER_CHAT_IDS: formatChatIdList(env.PASSENGER_CHAT_IDS),
+    SOURCE_CHAT_IDS: formatChatIdList(env.PASSENGER_CHAT_IDS)
+  });
+}
+
+export async function removePassengerSourceUsername(region: SourceRegion, username: string): Promise<string | null> {
+  const normalizedUsername = unregisterResolvedPassengerChatUsername(username, region);
+  if (!normalizedUsername) {
+    return null;
+  }
+
+  const passengerUsernameRegionalUpdates = Object.fromEntries(
+    SOURCE_REGIONS.map((item) => [getPassengerUsernameRegionalEnvKey(item), formatStringList(env.PASSENGER_CHAT_USERNAMES_BY_REGION[item])])
+  );
+
+  await updateEnvFile({
+    ...passengerUsernameRegionalUpdates,
+    PASSENGER_CHAT_USERNAMES: formatStringList(env.PASSENGER_CHAT_USERNAMES)
+  });
+
+  return normalizedUsername;
+}
+
+export async function removePassengerSource(region: SourceRegion, source: PassengerSourceAddResult): Promise<boolean> {
+  if (source.kind === "chat_id") {
+    await removePassengerSourceChat(region, source.value);
+    return true;
+  }
+
+  const result = await removePassengerSourceUsername(region, source.value);
+  return result !== null;
+}
+
+export function getPassengerSourcesByRegion(region: SourceRegion): { chatIds: number[]; usernames: string[] } {
+  return {
+    chatIds: [...(env.PASSENGER_CHAT_IDS_BY_REGION[region] ?? [])],
+    usernames: [...(env.PASSENGER_CHAT_USERNAMES_BY_REGION[region] ?? [])]
+  };
+}
+
+export async function removeDriverChat(region: SourceRegion): Promise<void> {
+  unsetEnvDriverRegion(region);
+
+  await updateEnvFile({
+    [getDriverRegionalEnvKey(region)]: "",
+    DRIVER_CHAT_ID: env.DRIVER_CHAT_ID === 0 ? "" : String(env.DRIVER_CHAT_ID)
+  });
 }
 
 export async function setDriverChat(region: SourceRegion, chatId: number): Promise<void> {

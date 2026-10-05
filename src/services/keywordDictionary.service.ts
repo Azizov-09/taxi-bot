@@ -66,7 +66,7 @@ let keywordCache: KeywordCacheState = {
   regexKeywords: []
 };
 
-const SOURCE_REGION_SET = new Set<string>(["TASHKENT", "GULISTON", "KOMSOMOL"]);
+const SOURCE_REGION_SET = new Set<string>(["TASHKENT", "GULISTON", "KOMSOMOL", "ANDIJON"]);
 
 function tryCompileRegex(pattern: string): RegExp | undefined {
   try {
@@ -242,42 +242,55 @@ export function mapInputCategory(value: string): KeywordCategory | null {
 export async function loadKeywordDictionaryCache(): Promise<void> {
   const rows = await prisma.keywordDictionary.findMany({
     where: { isActive: true },
+    select: {
+      id: true,
+      phrase: true,
+      normalized: true,
+      category: true,
+      weight: true,
+      language: true,
+      matchType: true,
+      source: true
+    },
     orderBy: [{ category: "asc" }, { weight: "desc" }, { normalized: "asc" }]
   });
 
-  const all = rows.map((row) => toCachedKeyword(row));
+  const all: CachedKeyword[] = [];
+  const byCategory: Record<KeywordCategory, CachedKeyword[]> = {
+    PASSENGER: [],
+    DRIVER: [],
+    CARGO: [],
+    SPAM: [],
+    AMBIGUOUS: []
+  };
   const phraseIndex = new Map<string, CachedKeyword[]>();
   const regexKeywords: CachedKeyword[] = [];
 
-  for (const item of all) {
+  for (let i = 0; i < rows.length; i++) {
+    const item = toCachedKeyword(rows[i] as any);
+    all.push(item);
+    byCategory[item.category]?.push(item);
+
     if (item.matchType === KeywordMatchType.REGEX) {
       regexKeywords.push(item);
       continue;
     }
 
     const token = item.firstToken;
-    if (!token) {
-      continue;
-    }
-
-    const bucket = phraseIndex.get(token);
-    if (!bucket) {
-      phraseIndex.set(token, [item]);
-    } else {
-      bucket.push(item);
+    if (token) {
+      const bucket = phraseIndex.get(token);
+      if (!bucket) {
+        phraseIndex.set(token, [item]);
+      } else {
+        bucket.push(item);
+      }
     }
   }
 
   keywordCache = {
     loadedAt: Date.now(),
     all,
-    byCategory: {
-      PASSENGER: all.filter((item) => item.category === KeywordCategory.PASSENGER),
-      DRIVER: all.filter((item) => item.category === KeywordCategory.DRIVER),
-      CARGO: all.filter((item) => item.category === KeywordCategory.CARGO),
-      SPAM: all.filter((item) => item.category === KeywordCategory.SPAM),
-      AMBIGUOUS: all.filter((item) => item.category === KeywordCategory.AMBIGUOUS)
-    },
+    byCategory,
     phraseIndex,
     regexKeywords
   };
@@ -456,6 +469,72 @@ export async function addKeywordEntry(params: {
 
   await loadKeywordDictionaryCache();
   return result;
+}
+
+export async function removeKeywordEntry(params: {
+  phrase: string;
+  category?: KeywordCategory | undefined;
+  source?: string | undefined;
+}): Promise<number> {
+  const phrase = params.phrase.trim();
+  if (phrase.length === 0) {
+    return 0;
+  }
+
+  const normalized = normalizePhrase(phrase);
+  if (!normalized) {
+    return 0;
+  }
+
+  const where: Prisma.KeywordDictionaryWhereInput = {
+    normalized,
+    isActive: true
+  };
+
+  if (params.category) {
+    where.category = params.category;
+  }
+
+  if (params.source) {
+    where.source = params.source;
+  }
+
+  const result = await prisma.keywordDictionary.updateMany({
+    where,
+    data: {
+      isActive: false
+    }
+  });
+
+  if (result.count > 0) {
+    await loadKeywordDictionaryCache();
+  }
+
+  return result.count;
+}
+
+export async function listKeywordEntries(params?: {
+  category?: KeywordCategory | undefined;
+  source?: string | undefined;
+  limit?: number | undefined;
+}): Promise<KeywordDictionary[]> {
+  const where: Prisma.KeywordDictionaryWhereInput = {
+    isActive: true
+  };
+
+  if (params?.category) {
+    where.category = params.category;
+  }
+
+  if (params?.source) {
+    where.source = params.source;
+  }
+
+  return prisma.keywordDictionary.findMany({
+    where,
+    orderBy: [{ weight: "desc" }, { createdAt: "desc" }],
+    take: params?.limit ?? 50
+  });
 }
 
 export function normalizeDictionaryPhrase(phrase: string): string {

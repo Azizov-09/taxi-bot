@@ -2,6 +2,7 @@ import { KeywordType, type Keyword } from "@prisma/client";
 import { prisma } from "../prisma/client.js";
 import { DEFAULT_KEYWORDS } from "../config/defaultKeywords.js";
 import { normalizeUzbekText } from "../utils/text.js";
+import { removeKeywordEntry } from "./keywordDictionary.service.js";
 
 export interface KeywordBucket {
   latin: string[];
@@ -143,6 +144,8 @@ export async function addKeyword(rawWord: string): Promise<Keyword> {
 
 export async function removeKeyword(rawWord: string): Promise<Keyword | null> {
   const word = normalizeUzbekText(rawWord);
+
+  await removeKeywordEntry({ phrase: rawWord }).catch(() => 0);
 
   const existing = await prisma.keyword.findUnique({ where: { word } });
 

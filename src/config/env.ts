@@ -634,6 +634,86 @@ export function registerResolvedPassengerChatUsername(username: string, region: 
   return normalizedUsername;
 }
 
+export function unregisterResolvedPassengerChat(chatId: number, region?: SourceRegion): void {
+  passengerChatRegionById.delete(chatId);
+
+  const regionsToRemoveFrom: SourceRegion[] = region ? [region] : SOURCE_REGIONS;
+  for (const reg of regionsToRemoveFrom) {
+    const arr = passengerChatIdsByRegion[reg];
+    const idx = arr.indexOf(chatId);
+    if (idx !== -1) {
+      arr.splice(idx, 1);
+    }
+  }
+
+  const remaining = SOURCE_REGIONS.some((r) => passengerChatIdsByRegion[r].includes(chatId));
+  if (!remaining) {
+    let idx = passengerChatIds.indexOf(chatId);
+    while (idx !== -1) {
+      passengerChatIds.splice(idx, 1);
+      idx = passengerChatIds.indexOf(chatId);
+    }
+    let sIdx = env.SOURCE_CHAT_IDS.indexOf(chatId);
+    while (sIdx !== -1) {
+      env.SOURCE_CHAT_IDS.splice(sIdx, 1);
+      sIdx = env.SOURCE_CHAT_IDS.indexOf(chatId);
+    }
+  }
+}
+
+export function unregisterResolvedPassengerChatUsername(username: string, region?: SourceRegion): string | null {
+  const normalizedUsername = normalizeTelegramChatUsername(username);
+  if (!normalizedUsername) {
+    return null;
+  }
+
+  passengerChatRegionByUsername.delete(normalizedUsername);
+
+  const regionsToRemoveFrom: SourceRegion[] = region ? [region] : SOURCE_REGIONS;
+  for (const reg of regionsToRemoveFrom) {
+    const arr = passengerChatUsernamesByRegion[reg];
+    const idx = arr.indexOf(normalizedUsername);
+    if (idx !== -1) {
+      arr.splice(idx, 1);
+    }
+  }
+
+  const remaining = SOURCE_REGIONS.some((r) => passengerChatUsernamesByRegion[r].includes(normalizedUsername));
+  if (!remaining) {
+    let idx = passengerChatUsernames.indexOf(normalizedUsername);
+    while (idx !== -1) {
+      passengerChatUsernames.splice(idx, 1);
+      idx = passengerChatUsernames.indexOf(normalizedUsername);
+    }
+  }
+
+  return normalizedUsername;
+}
+
+export function unsetEnvDriverRegion(region: SourceRegion): void {
+  driverChatIdByRegion[region] = null;
+  env.DRIVER_CHAT_ID_BY_REGION[region] = null;
+
+  if (region === "TASHKENT") {
+    env.DRIVER_CHAT_ID_TASHKENT = null;
+  } else if (region === "GULISTON") {
+    env.DRIVER_CHAT_ID_GULISTON = null;
+  } else if (region === "KOMSOMOL") {
+    env.DRIVER_CHAT_ID_KOMSOMOL = null;
+  } else {
+    env.DRIVER_CHAT_ID_ANDIJON = null;
+  }
+
+  const driverIds = [...new Set(Object.values(driverChatIdByRegion).filter((chatId): chatId is number => chatId !== null))];
+  driverChatIds.length = 0;
+  driverChatIds.push(...driverIds);
+  env.DRIVER_CHAT_IDS.length = 0;
+  env.DRIVER_CHAT_IDS.push(...driverIds);
+
+  const primaryDriverId = driverIds[0] ?? 0;
+  env.DRIVER_CHAT_ID = primaryDriverId;
+}
+
 export function getDriverChatIdBySourceChatId(chatId: number): number | null {
   const region = getSourceRegionByPassengerChatId(chatId);
   if (!region) {
